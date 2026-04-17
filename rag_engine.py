@@ -204,7 +204,7 @@ def build_chat_history(messages, max_turns=6):
     history = []
 
     # prendiamo ultimi turni (user + assistant)
-    recent = messages[-max_turns:]
+    recent = messages[-max_turns:] if messages else []
 
     for msg in recent:
         role = "Utente" if msg["role"] == "user" else "Assistente"
@@ -256,17 +256,23 @@ Domanda: {query}
     return response["message"]["content"]
 
 
-def direct_llm_answer(query):
+def direct_llm_answer(query, messages):
     """
     Risposta diretta senza usare tools o RAG.
     Serve per small talk o domande generiche.
     """
 
+    chat_history = build_chat_history(messages) if messages else ""
+    standalone_query = rewrite_query_with_memory(query, chat_history)
+
     prompt = f"""
 Sei un assistente AI utile e intelligente.
-Rispondi normalmente alla domanda dell'utente simpaticamente.
+Rispondi normalmente alla domanda dell'utente simpaticamente senza essere troppo conciso.
 
-Domanda: {query}
+Conversazione:
+{chat_history}
+
+Domanda: {standalone_query}
 """
     stream = ollama.chat(
         model="llama3",

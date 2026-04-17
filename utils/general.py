@@ -1,4 +1,6 @@
 import hashlib
+import re
+
 
 def group_by_file(structured_sources):
     files = {}
@@ -16,6 +18,12 @@ def get_file_hash(file):
 def make_source_link(file, page):
     # return f"[📄 {file} - pag.{page}](#)"
     return f'<a href="docs/{file}#page={page}" target="_blank">📄 {file} - pag.{page}</a>'
+
+def extract_between(text, start, end):
+    try:
+        return text.split(start)[1].split(end)[0]
+    except:
+        return ""
 
 def extract_keywords(query):
     words = re.findall(r"\w+", query.lower())

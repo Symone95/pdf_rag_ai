@@ -1,7 +1,6 @@
 import streamlit as st
 from rag_engine import add_documents, get_db_stats, reset_database, collection, get_file_hash
 import os
-
 from tools import agent_answer
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"

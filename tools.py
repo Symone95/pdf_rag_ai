@@ -3,6 +3,7 @@ import json
 import ollama
 from rag_engine import get_files_with_upload_date, get_files_in_db, direct_llm_answer, conversational_search, build_chat_history
 import streamlit as st
+from utils.general import extract_between
 
 TOOLS = [
     {
@@ -37,7 +38,7 @@ def agent_answer(query, selected_doc = None, messages = None):
 
     # 2️⃣ se nessun tool → risposta diretta
     if plan["tool"] == "none":
-        yield from direct_llm_answer(query)
+        yield from direct_llm_answer(query, messages)
         return
 
     # 3️⃣ esegui tool
@@ -51,6 +52,7 @@ def agent_answer(query, selected_doc = None, messages = None):
 Usa questi dati per rispondere all'utente.
 
 Regole:
+- Alla fine mostra sempre le fonti usate con nome del file e pagina in cui hai trovato le informazioni fornite
 - Rispondi in modo chiaro e diretto.
 - Non inventare dati.
 - Non parlare dello strumento.
@@ -76,9 +78,77 @@ Lo strumento ha restituito questi dati:
 
     return None
 
+
+def react_agent(query, messages, selected_doc=None):
+    REACT_PROMPT = """
+    Sei un agente AI che può usare strumenti.
+
+    Devi seguire questo formato:
+
+    Thought: pensa cosa fare
+    Action: nome_tool oppure None
+    Action Input: input per il tool
+    Observation: risultato del tool
+    ... (può ripetersi)
+    Final Answer: risposta finale all'utente
+
+    TOOLS DISPONIBILI:
+    - search_documents(query)
+    - list_documents()
+    - get_upload_dates()
+
+    REGOLE:
+    - NON inventare dati
+    - Usa tools quando servono
+    - Se hai abbastanza informazioni, rispondi con Final Answer
+
+    DOMANDA:
+    {query}
+
+    CONVERSAZIONE:
+    {history}
+    """
+
+    chat_history = build_chat_history(messages)
+
+    prompt = REACT_PROMPT.format(
+        query=query,
+        history=chat_history
+    )
+
+    max_steps = 5
+
+    for step in range(max_steps):
+
+        response = ollama.chat(
+            model="llama3",
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        output = response["message"]["content"]
+
+        print("🧠 REACT STEP:", output)
+
+        # 1️⃣ Se finale → stop
+        if "Final Answer:" in output:
+            final = output.split("Final Answer:")[-1]
+            yield final.strip()
+            return
+
+        # 2️⃣ Estrai Action
+        if "Action:" in output:
+            action = extract_between(output, "Action:", "\n").strip()
+            action_input = extract_between(output, "Action Input:", "\n")
+
+            # 3️⃣ esegui tool
+            observation = execute_tool(action, action_input, selected_doc)
+
+            # 4️⃣ aggiorna prompt con observation
+            prompt += f"\n{output}\nObservation: {observation}\n"
+
+
 def execute_tool(tool_name, query=None, selected_doc=None):
-    print("tool_name")
-    print(tool_name)
+    print("tool_name", tool_name)
     if tool_name == "search_documents":
         context, structured_sources = conversational_search(query, st.session_state.messages, selected_doc)
         return {
