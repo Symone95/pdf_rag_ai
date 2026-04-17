@@ -1,6 +1,5 @@
 import streamlit as st
-from rag_engine import add_documents, search_context, stream_llm_answer, get_db_stats, reset_database, collection, \
-    get_file_hash, group_by_file
+from rag_engine import add_documents, get_db_stats, reset_database, collection, get_file_hash
 import os
 
 from tools import agent_answer
@@ -89,7 +88,7 @@ if query:
         response_placeholder = st.chat_message("assistant").empty()
         full_response = ""
 
-        for chunk in agent_answer(query, selected_doc):
+        for chunk in agent_answer(query, selected_doc, st.session_state.messages):
             full_response += chunk
             response_placeholder.markdown(full_response + "▌")
 

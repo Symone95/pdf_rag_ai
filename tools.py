@@ -1,7 +1,8 @@
 import json
 
 import ollama
-from rag_engine import search_context, get_files_with_upload_date, get_files_in_db, direct_llm_answer
+from rag_engine import get_files_with_upload_date, get_files_in_db, direct_llm_answer, conversational_search, build_chat_history
+import streamlit as st
 
 TOOLS = [
     {
@@ -21,26 +22,29 @@ TOOLS = [
     }
 ]
 
-def agent_answer(query, selected_doc=None):
+def agent_answer(query, selected_doc = None, messages = None):
 
     print("AGENT ANSWER")
     # 1️⃣ planner decide tool
     plan_raw = tool_planner(query)
 
-    print("AGENT PLAN", plan_raw)
     try:
         plan = json.loads(plan_raw)
     except:
         plan = {"tool": "none"}
 
-    print(plan)
+    print("AGENT PLAN", plan)
 
     # 2️⃣ se nessun tool → risposta diretta
     if plan["tool"] == "none":
-        return direct_llm_answer(query)
+        yield from direct_llm_answer(query)
+        return
 
     # 3️⃣ esegui tool
     result = execute_tool(plan["tool"], query, selected_doc)
+
+    # Recupero la history dei messaggi per passarla alla conversazione in modo tale che abbia un ricordo di quanto detto fin'ora
+    chat_history = build_chat_history(messages) if messages else ""
 
     # 4️⃣ LLM finale usa risultato tool
     final_prompt = f"""
@@ -51,6 +55,9 @@ Regole:
 - Non inventare dati.
 - Non parlare dello strumento.
 - Non fare meta-commenti.
+
+Conversazione:
+{chat_history}
 
 Domanda dell'utente: {query}
 
@@ -73,7 +80,7 @@ def execute_tool(tool_name, query=None, selected_doc=None):
     print("tool_name")
     print(tool_name)
     if tool_name == "search_documents":
-        context, structured_sources = search_context(query, selected_doc)
+        context, structured_sources = conversational_search(query, st.session_state.messages, selected_doc)
         return {
             "context": context,
             "sources": structured_sources

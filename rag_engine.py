@@ -1,12 +1,11 @@
-import hashlib
 import chromadb
 from sentence_transformers import SentenceTransformer
 import ollama
-import re
 import logging
 from datetime import datetime
 
 from pdf_loader import chunk_text, load_pdf_paginated
+from utils.general import get_file_hash
 
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
@@ -35,27 +34,6 @@ def get_files_with_upload_date():
             file_dates[file] = date
 
     return file_dates
-
-def group_by_file(structured_sources):
-    files = {}
-
-    for s in structured_sources:
-        if s["file"] not in files:
-            files[s["file"]] = s
-
-    return list(files.values())
-
-def get_file_hash(file):
-    return hashlib.md5(file.getvalue()).hexdigest()
-
-def make_source_link(file, page):
-    # return f"[📄 {file} - pag.{page}](#)"
-    return f'<a href="docs/{file}#page={page}" target="_blank">📄 {file} - pag.{page}</a>'
-
-def extract_keywords(query):
-    words = re.findall(r"\w+", query.lower())
-    return [w for w in words if len(w) > 4]
-
 
 def get_files_in_db():
     data = collection.get(include=["metadatas"])
@@ -98,9 +76,8 @@ def add_documents(uploaded_files, file_hash_map):
 
             for i, chunk in enumerate(chunks):
                 # chunk_id = str(uuid.uuid4())
-                chunk_id = hashlib.md5(
-                    (file_hash + str(page_num) + chunk).encode()
-                ).hexdigest()
+                chunk_id = get_file_hash((file_hash + str(page_num) + chunk).encode())
+
                 all_chunks.append(chunk)
                 all_embeddings.append(embeddings[i])
                 all_ids.append(chunk_id)
@@ -196,8 +173,6 @@ def search_context(query, selected_doc=None, k_chunks=20):
     context_blocks = []
     structured_sources = []
 
-    print("merged_docs")
-    print(merged_docs)
     for i, doc in enumerate(merged_docs):
         doc_index = i + 1
         file_name = doc["file"]
@@ -221,7 +196,42 @@ def search_context(query, selected_doc=None, k_chunks=20):
 
     return context, structured_sources
 
+def build_chat_history(messages, max_turns=6):
+    """
+    Costruisce history compatta per il retriever.
+    Manteniamo solo gli ultimi N turni per evitare prompt enormi.
+    """
+    history = []
 
+    # prendiamo ultimi turni (user + assistant)
+    recent = messages[-max_turns:]
+
+    for msg in recent:
+        role = "Utente" if msg["role"] == "user" else "Assistente"
+        history.append(f"{role}: {msg['content']}")
+
+    return "\n".join(history)
+
+def conversational_search(query, messages, selected_doc=None):
+    """
+    Pipeline completa conversational RAG
+    """
+
+    # 1. build memory
+    chat_history = build_chat_history(messages)
+
+    # 2. rewrite query 🔥
+    standalone_query = rewrite_query_with_memory(query, chat_history)
+
+    print("🔵 Original query:", query)
+    print("🟢 Rewritten query:", standalone_query)
+
+    # 3. retrieval normale
+    context, sources = search_context(standalone_query, selected_doc)
+
+    return context, sources
+
+# --- FUNZIONI LLM ---
 def ask_llm(query, context):
     """
     Funzione per chiamare llm one shot e avere una risposta caricata tutta insieme, se vuoi una risposta caricata parola per parola utilizza la funzione `stream_llm_answer`
@@ -246,49 +256,6 @@ Domanda: {query}
     return response["message"]["content"]
 
 
-def stream_llm_answer(query, context, sources):
-    """
-    Funzione per caricare la risposta parola per parola e avere una fluidità di risposta sull'interfaccia
-    :param query:
-    :param context:
-    :return:
-    """
-
-    # sources_text = "\n".join(structured_sources)
-    sources_text = "\n".join(
-        [f"[{s['index']}] {s['file']} - pag. {s['page']}" for s in sources]
-    )
-
-    prompt = f"""
-Usa il contesto per rispondere.
-
-Regole:
-- Non inventare informazioni
-- Usa solo il contesto
-- Non parlare dello strumento.
-- Non fare meta-commenti.
-- cita le fonti con [1], [2], ecc.
-- Alla fine mostra sempre le fonti usate con nome del file e pagina in cui hai trovato le informazioni fornite con [1], [2], ecc. e devono corrispondere ai numeri nel contesto
-
-Contesto:
-{context}
-
-Domanda: {query}
-
-Fonti:
-{sources_text}
-"""
-
-    stream = ollama.chat(
-        model="llama3",
-        messages=[{"role": "user", "content": prompt}],
-        stream=True
-    )
-
-    for chunk in stream:
-        yield chunk["message"]["content"]
-
-
 def direct_llm_answer(query):
     """
     Risposta diretta senza usare tools o RAG.
@@ -301,13 +268,52 @@ Rispondi normalmente alla domanda dell'utente simpaticamente.
 
 Domanda: {query}
 """
-    print("SONO QUI, la tua richiesta è: ", query)
     stream = ollama.chat(
         model="llama3",
         messages=[{"role": "user", "content": prompt}],
         stream=True
     )
-    print(len(stream))
+
     for chunk in stream:
-        print(chunk)
         yield chunk["message"]["content"]
+
+
+def rewrite_query_with_memory(query, chat_history):
+    """
+    Riscrive la domanda rendendola standalone.
+    Fondamentale per conversational retrieval.
+    """
+
+    if not chat_history:
+        return query
+
+    prompt = f"""
+Sei un sistema che riscrive domande per un motore di ricerca.
+
+Obiettivo:
+Trasforma la domanda in una domanda standalone completa, usando il contesto della conversazione.
+
+NON rispondere alla domanda.
+Produci SOLO la domanda riscritta.
+
+Conversazione:
+{chat_history}
+
+Domanda attuale:
+{query}
+
+Domanda standalone:
+"""
+
+    response = ollama.chat(
+        model="llama3",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    rewritten = response["message"]["content"].strip()
+
+    # fallback sicurezza
+    if len(rewritten) < 5:
+        return query
+
+    return rewritten
